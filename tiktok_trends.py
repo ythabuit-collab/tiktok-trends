@@ -20,7 +20,7 @@ import re
 from datetime import datetime
 from pytrends.request import TrendReq
 
-TELEGRAM_TOKEN   = "8611988792:AAGOJ7xDWPRJveS0jOe71NH5rWczdKwPUgI"
+TELEGRAM_TOKEN   = "8666345176:AAGGNb8WDXcwchrLaUByxXcvBOytdezNV6w"
 TELEGRAM_CHAT_ID = "8559815820"
 ANTHROPIC_API_KEY = ""  # Optionnel — pour les idées contenu IA
 
