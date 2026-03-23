@@ -1,218 +1,252 @@
 """
-TIKTOK TREND BOT v2 — Sources fiables uniquement
-Sources : Google Trends FR + recherches virales réelles
+TIKTOK TREND BOT v3 — US + FR + Toutes niches
+Sources : Google Trends US+FR, Billboard, TikTok Creative Center,
+          YouTube Charts, Spotify Charts
+Logique : détecte ce qui explose aux US AVANT que ça arrive en France
 """
 
 import requests
 import time
 import re
+import random
 from datetime import datetime
 
 TELEGRAM_TOKEN   = "8666345176:AAGGNb8WDXcwchrLaU-nPJj3UVtGX9Hk6Xc"
 TELEGRAM_CHAT_ID = "8559815820"
 
-CHECK_INTERVAL = 3600  # toutes les heures
+CHECK_INTERVAL = 3600   # toutes les heures
+MIN_SCORE      = 40     # score Google Trends minimum
 
-# ── Mots-clés réels à surveiller ──────────────────────────
+# ════════════════════════════════════════════════════════
+#  🌍  SURVEILLANCE MULTI-PAYS
+#  Logique : US explose → France dans 2-4 semaines → tu es premier
+# ════════════════════════════════════════════════════════
 
-TREND_KEYWORDS = {
-    "Sport & Fitness": [
-        "routine muscu", "programme musculation", "transformation physique",
-        "seche musculation", "prise de masse", "workout routine",
-        "calisthenics debutant", "home workout", "bulk cut regime"
-    ],
-    "Mode & Style": [
-        "outfit homme 2025", "tenue casual homme", "streetwear tendance",
-        "look stylé homme", "sneakers tendance 2025", "capsule wardrobe homme",
-        "vinted trouvaille", "mode luxe abordable", "tenue sport chic"
-    ],
-    "Lifestyle & Motivation": [
-        "routine matinale productive", "discipline mindset", "day in my life",
-        "habitudes succès", "morning routine 2025", "productivité routine",
-        "psychologie motivation", "mindset winner"
-    ],
-    "TikTok Viral": [
-        "tiktok viral france", "trend tiktok 2025", "son viral tiktok",
-        "challenge tiktok mars 2025", "transition tiktok", "pov tiktok viral"
-    ]
+GEO_CONFIGS = {
+    "🇺🇸 USA":     {"geo": "US", "lang": "en-US", "flag": "🇺🇸", "delay_weeks": 0},
+    "🇬🇧 UK":      {"geo": "GB", "lang": "en-GB", "flag": "🇬🇧", "delay_weeks": 1},
+    "🇫🇷 France":  {"geo": "FR", "lang": "fr-FR", "flag": "🇫🇷", "delay_weeks": 3},
 }
 
-# ── Google Trends ─────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+#  🔍  MOTS-CLÉS LARGES — toutes niches sans limites
+# ════════════════════════════════════════════════════════
 
-def get_trends_for_keywords(keywords, geo="FR"):
+BROAD_KEYWORDS = {
+    "Viral & Trends":        ["viral video", "trending now", "tiktok trend", "new challenge", "tiktok sound"],
+    "Sport & Body":          ["workout routine", "gym transformation", "fitness tips", "weight loss", "muscle gain", "calisthenics"],
+    "Mode & Fashion":        ["outfit ideas", "style tips men", "streetwear", "fashion trend", "outfit of the day", "sneakers"],
+    "Music & Sounds":        ["new music", "song viral", "trending song", "music trend", "top hits"],
+    "Lifestyle":             ["day in my life", "morning routine", "productive day", "daily vlog", "life tips"],
+    "Mental & Psychology":   ["mindset", "motivation", "psychology tips", "mental health", "self improvement"],
+    "Food & Health":         ["meal prep", "healthy food", "diet tips", "nutrition", "high protein meal"],
+    "Tech & AI":             ["ai trend", "new technology", "tech tips", "artificial intelligence"],
+    "Entertainment":         ["funny video", "prank", "reaction video", "story time", "drama"],
+    "Money & Business":      ["side hustle", "make money online", "passive income", "invest money", "resell tips"],
+    # Versions françaises
+    "Tendances FR":          ["tendance tiktok", "son viral tiktok", "challenge france", "video virale france"],
+    "Sport FR":              ["routine muscu", "transformation physique", "programme fitness", "seche muscu"],
+    "Mode FR":               ["tenue homme", "outfit stylé", "streetwear france", "sneakers tendance"],
+    "Lifestyle FR":          ["routine matinale", "journée productive", "vlog quotidien", "motivation france"],
+}
+
+# ════════════════════════════════════════════════════════
+#  📊  GOOGLE TRENDS — US + FR en parallèle
+# ════════════════════════════════════════════════════════
+
+def get_trends_multi_geo(keywords, geos=["US", "FR"]):
     """
-    Utilise pytrends pour récupérer les scores réels Google Trends.
+    Compare les scores entre pays pour détecter ce qui explose aux US
+    avant d'arriver en France.
     """
     results = {}
     try:
         from pytrends.request import TrendReq
-        pytrends = TrendReq(hl="fr-FR", tz=60)
+        pytrends = TrendReq(hl="en-US", tz=0)
+        chunks   = [keywords[i:i+5] for i in range(0, len(keywords), 5)]
 
-        chunks = [keywords[i:i+5] for i in range(0, len(keywords), 5)]
         for chunk in chunks:
-            try:
-                pytrends.build_payload(chunk, timeframe="now 7-d", geo=geo)
-                df = pytrends.interest_over_time()
-                if df.empty:
-                    time.sleep(2); continue
-                for kw in chunk:
-                    if kw in df.columns:
-                        avg    = int(df[kw].mean())
-                        recent = int(df[kw].tail(2).mean())
-                        delta  = recent - avg
-                        if recent >= 30 or delta >= 15:
-                            results[kw] = {"score": recent, "delta": delta, "avg": avg}
-                time.sleep(3)
-            except Exception as e:
-                print(f"  [Trends] chunk erreur: {e}"); time.sleep(5)
+            geo_scores = {}
+            for geo in geos:
+                try:
+                    pytrends.build_payload(chunk, timeframe="now 7-d", geo=geo)
+                    df = pytrends.interest_over_time()
+                    if df.empty: time.sleep(2); continue
+                    for kw in chunk:
+                        if kw in df.columns:
+                            if kw not in geo_scores:
+                                geo_scores[kw] = {}
+                            geo_scores[kw][geo] = {
+                                "avg":    int(df[kw].mean()),
+                                "recent": int(df[kw].tail(2).mean()),
+                                "delta":  int(df[kw].tail(2).mean()) - int(df[kw].mean()),
+                            }
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"  [Trends {geo}] erreur: {e}"); time.sleep(3)
+
+            # Analyse cross-pays
+            for kw, scores in geo_scores.items():
+                us_score = scores.get("US", {}).get("recent", 0)
+                fr_score = scores.get("FR", {}).get("recent", 0)
+                us_delta = scores.get("US", {}).get("delta", 0)
+                fr_delta = scores.get("FR", {}).get("delta", 0)
+
+                # OPPORTUNITÉ : fort aux US, faible en France = arriving soon
+                us_fr_gap = us_score - fr_score
+
+                if us_score >= MIN_SCORE or fr_score >= MIN_SCORE:
+                    opportunity = "normal"
+                    if us_score >= 50 and fr_score < 30:
+                        opportunity = "🔮 ARRIVE EN FRANCE BIENTÔT"
+                    elif us_score >= 70 and us_delta >= 20:
+                        opportunity = "🚀 EXPLOSE AUX US MAINTENANT"
+                    elif fr_score >= 60 and fr_delta >= 20:
+                        opportunity = "🔥 VIRAL EN FRANCE MAINTENANT"
+
+                    results[kw] = {
+                        "us_score":    us_score,
+                        "fr_score":    fr_score,
+                        "us_delta":    us_delta,
+                        "fr_delta":    fr_delta,
+                        "us_fr_gap":   us_fr_gap,
+                        "opportunity": opportunity,
+                        "score":       max(us_score, fr_score),
+                        "priority":    us_score * 1.5 + fr_score + us_delta * 2,
+                    }
+            time.sleep(3)
     except ImportError:
         print("  [Trends] pytrends non disponible")
     return results
 
-def get_trending_searches_fr():
-    """Récupère les recherches trending Google France."""
+def get_trending_searches_both():
+    """Trending searches US et FR."""
+    results = {"US": [], "FR": []}
     try:
         from pytrends.request import TrendReq
-        pytrends = TrendReq(hl="fr-FR", tz=60)
-        df = pytrends.trending_searches(pn="france")
-        return df[0].tolist()[:15]
-    except Exception as e:
-        print(f"  [Trending] erreur: {e}"); return []
-
-def get_related_rising(keyword, geo="FR"):
-    """Récupère les requêtes montantes liées à un mot-clé."""
-    try:
-        from pytrends.request import TrendReq
-        pytrends = TrendReq(hl="fr-FR", tz=60)
-        pytrends.build_payload([keyword], timeframe="now 7-d", geo=geo)
-        related = pytrends.related_queries()
-        if keyword in related and related[keyword].get("rising") is not None:
-            return related[keyword]["rising"]["query"].tolist()[:5]
+        pytrends = TrendReq(hl="en-US", tz=0)
+        for geo, pn in [("US", "united_states"), ("FR", "france")]:
+            try:
+                df = pytrends.trending_searches(pn=pn)
+                results[geo] = df[0].tolist()[:10]
+                time.sleep(2)
+            except Exception as e:
+                print(f"  [Trending {geo}] erreur: {e}")
     except:
         pass
-    return []
+    return results
 
-# ── Sources complémentaires fiables ───────────────────────
+# ════════════════════════════════════════════════════════
+#  🎵  BILLBOARD HOT 100 — Sons qui vont exploser en France
+# ════════════════════════════════════════════════════════
 
-def get_youtube_trending_music():
+def get_billboard_hot100():
     """
-    Récupère les musiques tendance depuis YouTube Charts France
-    (page publique sans API).
+    Scrape Billboard Hot 100 — ce qui est chaud aux US
+    arrive en France 2-4 semaines après.
     """
     songs = []
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "fr-FR,fr;q=0.9",
+            "Accept-Language": "en-US,en;q=0.9",
         }
-        r = requests.get("https://charts.youtube.com/charts/TopSongs/fr", headers=headers, timeout=10)
-        # Extraction noms d'artistes et titres
-        titles = re.findall(r'"title"\s*:\s*"([^"]{3,60})"', r.text)
-        artists = re.findall(r'"artist"\s*:\s*"([^"]{2,40})"', r.text)
-        for i in range(min(8, len(titles), len(artists))):
-            songs.append(f"{artists[i]} — {titles[i]}")
+        r = requests.get("https://www.billboard.com/charts/hot-100/", headers=headers, timeout=12)
+        if r.status_code == 200:
+            # Extraction titres et artistes
+            titles  = re.findall(r'class="c-title[^"]*"[^>]*>\s*<[^>]+>([^<]+)<', r.text)
+            artists = re.findall(r'class="c-label[^"]*"[^>]*>\s*<[^>]+>([^<]+)<', r.text)
+            for i in range(min(10, len(titles), len(artists))):
+                t = titles[i].strip()
+                a = artists[i].strip()
+                if t and a and len(t) > 1 and len(a) > 1:
+                    songs.append(f"{a} — {t}")
     except Exception as e:
-        print(f"  [YouTube Charts] erreur: {e}")
+        print(f"  [Billboard] erreur: {e}")
+    return songs[:10]
 
-    # Fallback : Shazam Top France via recherche Google Trends
-    if not songs:
-        try:
-            from pytrends.request import TrendReq
-            pytrends = TrendReq(hl="fr-FR", tz=60)
-            pytrends.build_payload(["musique tendance"], timeframe="now 7-d", geo="FR")
-            related = pytrends.related_queries()
-            if "musique tendance" in related:
-                df = related["musique tendance"].get("rising")
-                if df is not None:
-                    songs = df["query"].tolist()[:8]
-        except:
-            pass
-
+def get_spotify_viral():
+    """
+    Récupère le top Spotify viral France depuis l'embed public.
+    """
+    songs = []
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+        }
+        r = requests.get(
+            "https://charts.spotify.com/charts/view/viral-fr-daily/latest",
+            headers=headers, timeout=10
+        )
+        if r.status_code == 200:
+            titles  = re.findall(r'"trackName"\s*:\s*"([^"]+)"', r.text)
+            artists = re.findall(r'"artistName"\s*:\s*"([^"]+)"', r.text)
+            for i in range(min(8, len(titles), len(artists))):
+                songs.append(f"{artists[i]} — {titles[i]}")
+    except Exception as e:
+        print(f"  [Spotify] erreur: {e}")
     return songs[:8]
 
-def get_tiktok_hashtags_from_google():
-    """
-    Récupère de vrais hashtags TikTok trending via Google Trends
-    en cherchant les requêtes montantes autour de TikTok.
-    """
-    hashtags = []
-    try:
-        from pytrends.request import TrendReq
-        pytrends = TrendReq(hl="fr-FR", tz=60)
+# ════════════════════════════════════════════════════════
+#  💡  GÉNÉRATEUR D'IDÉES CONTENU — Adapté à TON profil
+# ════════════════════════════════════════════════════════
 
-        # Recherche les termes montants autour de tiktok
-        for search_term in ["tiktok tendance", "tiktok viral", "son tiktok"]:
-            try:
-                pytrends.build_payload([search_term], timeframe="now 7-d", geo="FR")
-                related = pytrends.related_queries()
-                if search_term in related:
-                    rising = related[search_term].get("rising")
-                    if rising is not None:
-                        for query in rising["query"].tolist()[:5]:
-                            # Nettoie et garde seulement les vrais termes
-                            clean = query.strip().lower()
-                            if len(clean) > 3 and not re.match(r'^[#0-9]', clean):
-                                hashtags.append(clean)
-                time.sleep(2)
-            except:
-                pass
-    except:
-        pass
-
-    return list(set(hashtags))[:10]
-
-# ── Idées contenu sans IA ─────────────────────────────────
-
-CONTENT_IDEAS = {
-    "Sport & Fitness": [
-        "🎬 Montre ta transformation en 15 secondes\n📋 Photo avant → vidéo d'entraînement → résultat\n💡 Hook : 'X mois de travail pour ça'",
-        "🎬 Ta routine muscu du matin en accéléré\n📋 Réveil → nutrition → séance → résultat\n💡 Hook : 'Ma routine à {heure}h du matin'",
-        "🎬 Les 3 erreurs que tu fais à la salle\n📋 Erreur 1 → 2 → 3 avec correction\n💡 Hook : 'Arrête de faire ça à la salle'",
-    ],
-    "Mode & Style": [
-        "🎬 Transition tenue avant/après en 3 secondes\n📋 Tenue basique → tenue stylée même budget\n💡 Hook : 'POV tu sais t'habiller'",
-        "🎬 3 tenues avec 5 pièces seulement\n📋 Les pièces → combinaison 1 → 2 → 3\n💡 Hook : 'Tu n'as pas besoin de plus'",
-        "🎬 Ma trouvaille Vinted de la semaine\n📋 Prix payé → vraie valeur → comment la styler\n💡 Hook : 'J'ai payé X€ pour ça'",
-    ],
-    "Lifestyle & Motivation": [
-        "🎬 Ma journée type en 30 secondes\n📋 Matin → sport → cours → soir\n💡 Hook : 'Ma journée à {heure} en semaine'",
-        "🎬 Ce que j'ai appris en psycho cette semaine\n📋 Concept psy → application concrète → conseil\n💡 Hook : 'La psychologie m'a appris que...'",
-        "🎬 5h de marche par jour ce que ça change\n📋 Avant → habitude → transformation mentale\n💡 Hook : 'Je marche 2000 calories par jour'",
-    ],
-    "TikTok Viral": [
-        "🎬 Utilise ce son/trend MAINTENANT\n📋 Adapte le format à ta niche sport/mode\n💡 Hook : jump cut dynamique dès la 1ère seconde",
-        "🎬 POV version sport/mode\n📋 Situation → réaction → twist final\n💡 Hook : 'POV tu...'",
-    ]
+PROFILE = {
+    "sport":   ["muscu", "foot", "cardio", "marche", "transformation"],
+    "mode":    ["streetwear", "luxe", "vinted", "outfit", "sneakers"],
+    "mindset": ["psychologie", "discipline", "motivation", "routine"],
+    "vie":     ["étudiant", "lifestyle", "vlog", "journée"],
 }
 
-import random
+CONTENT_TEMPLATES = [
+    # Sport
+    ("Sport", "🎬 CONCEPT : Montre ta progression en {kw}\n⏱️ DURÉE : 15-30 sec\n📋 SCRIPT : Avant → pendant → résultat\n💡 HOOK : 'X semaines pour ça' ou 'Ce que personne dit sur {kw}'\n⚡ POURQUOI : La transformation = emotion = partage"),
+    ("Sport", "🎬 CONCEPT : Démystifie une idée reçue sur {kw}\n⏱️ DURÉE : 20-45 sec\n📋 SCRIPT : Idée reçue → ta réponse → preuve\n💡 HOOK : 'Arrête de croire que...' ou 'La vérité sur {kw}'\n⚡ POURQUOI : Le contraste crée l'engagement"),
+    # Mode
+    ("Mode", "🎬 CONCEPT : Transition tenue avec {kw}\n⏱️ DURÉE : 7-15 sec\n📋 SCRIPT : Tenue basique → transformation en 1 geste\n💡 HOOK : Premier frame stylé qui arrête le scroll\n⚡ POURQUOI : Les transitions = forte rétention"),
+    ("Mode", "🎬 CONCEPT : Trouvaille {kw} → vraie valeur\n⏱️ DURÉE : 20-30 sec\n📋 SCRIPT : Prix payé → marque → prix réel → comment styler\n💡 HOOK : 'J'ai payé X€ pour ça' (prix choquant)\n⚡ POURQUOI : L'argent économisé = partage massif"),
+    # Lifestyle
+    ("Lifestyle", "🎬 CONCEPT : Ma routine {kw} en accéléré\n⏱️ DURÉE : 30-60 sec\n📋 SCRIPT : Réveil → étapes clés → résultat de la journée\n💡 HOOK : 'Ma journée type à {heure}h' + musique motivante\n⚡ POURQUOI : Les routines = aspiration = abonnement"),
+    ("Lifestyle", "🎬 CONCEPT : Ce que {kw} m'a appris\n⏱️ DURÉE : 30-45 sec\n📋 SCRIPT : Contexte → leçon 1 → 2 → 3 → conclusion\n💡 HOOK : 'X mois de {kw} pour comprendre ça'\n⚡ POURQUOI : La valeur éducative = sauvegarde"),
+    # Psychologie
+    ("Psycho", "🎬 CONCEPT : Concept psy appliqué à {kw}\n⏱️ DURÉE : 30-60 sec\n📋 SCRIPT : Problème commun → explication psy → solution concrète\n💡 HOOK : 'La psychologie explique pourquoi tu...'\n⚡ POURQUOI : Unique = personne ne fait ça = différenciation"),
+    # Viral
+    ("Viral", "🎬 CONCEPT : Adapte la trend {kw} à ta niche\n⏱️ DURÉE : 7-30 sec selon trend\n📋 SCRIPT : Même format que la trend mais version toi\n💡 HOOK : Même son/format mais contexte sport/mode/lifestyle\n⚡ POURQUOI : Trend + niche = algorithme booste"),
+    ("Viral", "🎬 CONCEPT : POV version {kw}\n⏱️ DURÉE : 15-30 sec\n📋 SCRIPT : Situation → réaction → twist ou conseil\n💡 HOOK : 'POV tu es...' + situation relatable\n⚡ POURQUOI : Le POV = identification = partage"),
+]
 
-def get_content_idea(niche):
-    ideas = CONTENT_IDEAS.get(niche, CONTENT_IDEAS["TikTok Viral"])
-    return random.choice(ideas)
+def get_content_idea(keyword, niche_category=""):
+    template_type, template = random.choice(CONTENT_TEMPLATES)
+    idea = template.replace("{kw}", keyword)
+    idea = idea.replace("{heure}", str(random.choice([6, 7, 8])))
+    return idea
 
-# ── Horaires optimaux de publication ─────────────────────
+# ════════════════════════════════════════════════════════
+#  ⏰  HORAIRES OPTIMAUX PAR JOUR
+# ════════════════════════════════════════════════════════
 
-def get_best_post_time():
-    """Retourne les meilleurs horaires TikTok selon le jour."""
+def get_best_times():
     day = datetime.now().weekday()
-    times = {
-        0: "7h-9h ou 19h-21h (Lundi)",
-        1: "7h-9h ou 18h-20h (Mardi)",
-        2: "7h-9h ou 19h-21h (Mercredi)",
-        3: "7h-9h ou 20h-22h (Jeudi)",
-        4: "7h-9h ou 17h-19h (Vendredi)",
-        5: "10h-12h ou 20h-23h (Samedi)",
-        6: "10h-12h ou 19h-22h (Dimanche)",
+    schedule = {
+        0: ["7h00", "12h30", "19h00", "21h00"],
+        1: ["7h00", "12h30", "18h00", "20h00"],
+        2: ["7h00", "12h00", "19h00", "21h00"],
+        3: ["7h00", "12h30", "20h00", "22h00"],
+        4: ["7h00", "12h00", "17h00", "21h00"],
+        5: ["10h00", "13h00", "20h00", "23h00"],
+        6: ["10h00", "12h00", "19h00", "22h00"],
     }
-    return times.get(day, "7h-9h ou 19h-21h")
+    times = schedule.get(day, ["7h00", "12h00", "19h00"])
+    return " | ".join(times)
 
-# ── Telegram ──────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+#  📲  TELEGRAM
+# ════════════════════════════════════════════════════════
 
 def send_telegram(message):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
+        "text": message[:4096],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
@@ -225,87 +259,100 @@ def send_telegram(message):
     except Exception as e:
         print(f"[ERREUR] Telegram: {e}"); return False
 
-# ── Analyse principale ────────────────────────────────────
+# ════════════════════════════════════════════════════════
+#  🚀  ANALYSE PRINCIPALE
+# ════════════════════════════════════════════════════════
 
 already_alerted = set()
 
 def analyze_and_alert():
-    print(f"\n[{datetime.now().strftime('%H:%M')}] Analyse trends...")
+    print(f"\n[{datetime.now().strftime('%H:%M')}] Analyse US+FR en cours...")
     alerts_sent = 0
-    best_trends = []
+    all_trends  = []
 
-    # 1. Google Trends par niche
-    print("  [1/4] Google Trends par niche...")
-    for niche, keywords in TREND_KEYWORDS.items():
-        results = get_trends_for_keywords(keywords)
+    # ── 1. Google Trends toutes niches US+FR ──
+    print("  [1/5] Google Trends US + FR...")
+    for category, keywords in BROAD_KEYWORDS.items():
+        results = get_trends_multi_geo(keywords, geos=["US", "FR"])
         for kw, data in results.items():
-            best_trends.append({
-                "name":  kw,
-                "niche": niche,
-                "score": data["score"],
-                "delta": data["delta"],
+            all_trends.append({
+                "name":        kw,
+                "category":    category,
+                "us_score":    data["us_score"],
+                "fr_score":    data["fr_score"],
+                "us_delta":    data["us_delta"],
+                "opportunity": data["opportunity"],
+                "priority":    data["priority"],
             })
         time.sleep(2)
 
-    # 2. Recherches trending Google France
-    print("  [2/4] Trending searches France...")
-    trending = get_trending_searches_fr()
-    for t in trending:
-        t_lower = t.lower()
-        if any(w in t_lower for w in ["sport", "mode", "fit", "gym", "style", "musique", "son", "trend", "tenue", "outfit"]):
-            best_trends.append({
-                "name":  t,
-                "niche": "TikTok Viral",
-                "score": 80,
-                "delta": 40,
-            })
-
-    # 3. Hashtags TikTok réels via Google
-    print("  [3/4] Hashtags TikTok réels...")
-    hashtags = get_tiktok_hashtags_from_google()
-    for h in hashtags:
-        best_trends.append({
-            "name":  f"#{h}",
-            "niche": "TikTok Viral",
-            "score": 70,
-            "delta": 25,
+    # ── 2. Trending searches US + FR ──
+    print("  [2/5] Trending searches US + FR...")
+    trending = get_trending_searches_both()
+    for term in trending.get("US", []):
+        all_trends.append({
+            "name":        term,
+            "category":    "🇺🇸 Trending USA",
+            "us_score":    85,
+            "fr_score":    20,
+            "us_delta":    50,
+            "opportunity": "🔮 ARRIVE EN FRANCE BIENTÔT",
+            "priority":    200,
+        })
+    for term in trending.get("FR", []):
+        all_trends.append({
+            "name":        term,
+            "category":    "🇫🇷 Trending France",
+            "us_score":    30,
+            "fr_score":    85,
+            "us_delta":    10,
+            "opportunity": "🔥 VIRAL EN FRANCE MAINTENANT",
+            "priority":    180,
         })
 
-    # Tri par score + delta
-    best_trends.sort(key=lambda x: x["score"] + x["delta"] * 1.5, reverse=True)
+    # ── Tri par priorité ──
+    all_trends.sort(key=lambda x: x["priority"], reverse=True)
 
-    # Envoi top 5 trends non déjà alertées
+    # ── Envoi top 6 trends ──
     top = 0
-    for trend in best_trends:
-        if top >= 5: break
-        key = trend["name"].lower().replace(" ", "_")
+    for trend in all_trends:
+        if top >= 6: break
+        key = trend["name"].lower().replace(" ", "_")[:40]
         if key in already_alerted: continue
         already_alerted.add(key)
 
-        score = trend["score"]
-        delta = trend["delta"]
-        niche = trend["niche"]
-        name  = trend["name"]
+        name        = trend["name"]
+        category    = trend["category"]
+        us_score    = trend["us_score"]
+        fr_score    = trend["fr_score"]
+        us_delta    = trend["us_delta"]
+        opportunity = trend["opportunity"]
+        idea        = get_content_idea(name, category)
 
-        if delta >= 40:   window = "⚡ MAINTENANT — moins de 24h"
-        elif delta >= 20: window = "🔴 48h maximum"
-        elif delta >= 10: window = "🟠 3-4 jours"
-        else:             window = "🟡 Cette semaine"
-
-        idea = get_content_idea(niche)
+        # Fenêtre
+        if "MAINTENANT" in opportunity or "MAINTENANT" in opportunity:
+            window = "⚡ Poste AUJOURD'HUI"
+        elif "BIENTÔT" in opportunity:
+            window = "📅 Poste cette semaine — sois premier en FR"
+        elif us_delta >= 30:
+            window = "🔴 48h maximum"
+        else:
+            window = "🟡 Cette semaine"
 
         msg = (
-            f"🎯 <b>TREND DÉTECTÉE — {niche.upper()}</b>\n\n"
+            f"🎯 <b>TREND DÉTECTÉE</b> — {opportunity}\n\n"
             f"📌 <b>{name}</b>\n"
-            f"📈 Score viralité : <b>{score}/100</b>\n"
-            f"⬆️ Progression : +{delta} pts cette semaine\n"
-            f"⏰ Fenêtre : <b>{window}</b>\n\n"
+            f"🏷️ Catégorie : {category}\n\n"
+            f"📊 <b>Scores :</b>\n"
+            f"🇺🇸 USA    : {us_score}/100 (+{us_delta} cette semaine)\n"
+            f"🇫🇷 France : {fr_score}/100\n\n"
+            f"⏰ <b>Fenêtre : {window}</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"💡 <b>IDÉE CONTENU POUR TOI :</b>\n\n"
+            f"💡 <b>IDÉE CONTENU :</b>\n\n"
             f"{idea}\n\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🔍 Cherche sur TikTok : <b>{name}</b>\n"
-            f"⏰ Meilleurs horaires : {get_best_post_time()}\n"
+            f"🔍 Cherche : <b>{name}</b> sur TikTok\n"
+            f"⏰ Poster à : {get_best_times()}\n"
             f"📅 {datetime.now().strftime('%H:%M — %d/%m/%Y')}"
         )
         send_telegram(msg)
@@ -313,47 +360,90 @@ def analyze_and_alert():
         top += 1
         time.sleep(2)
 
-    # 4. Sons viraux
-    print("  [4/4] Sons viraux...")
-    songs = get_youtube_trending_music()
-    if songs:
+    # ── 3. Billboard Hot 100 ──
+    print("  [3/5] Billboard Hot 100...")
+    billboard = get_billboard_hot100()
+    if billboard:
         msg = (
-            f"🎵 <b>SONS VIRAUX DU MOMENT — {datetime.now().strftime('%d/%m')}</b>\n\n"
+            f"🎵 <b>BILLBOARD HOT 100 — Sons qui arrivent en France</b>\n"
+            f"🇺🇸 Ces sons explosent aux US maintenant\n"
+            f"📅 Attendus en France dans 2-4 semaines\n\n"
         )
-        for i, s in enumerate(songs, 1):
+        for i, s in enumerate(billboard[:8], 1):
             msg += f"{i}. {s}\n"
         msg += (
-            f"\n💡 <b>Comment utiliser ces sons :</b>\n"
-            f"→ Cherche le son sur TikTok\n"
-            f"→ Regarde les vidéos qui performent\n"
-            f"→ Adapte à ta niche sport/mode\n"
-            f"→ Poste dans les 24h\n\n"
-            f"⏰ Meilleurs horaires : {get_best_post_time()}\n"
-            f"📅 {datetime.now().strftime('%H:%M — %d/%m/%Y')}"
+            f"\n💡 <b>Stratégie :</b>\n"
+            f"→ Cherche ces sons sur TikTok US\n"
+            f"→ Regarde les trends autour\n"
+            f"→ Prépare ton contenu maintenant\n"
+            f"→ Poste dès que le son arrive en FR\n\n"
+            f"⏰ {datetime.now().strftime('%H:%M — %d/%m/%Y')}"
         )
         send_telegram(msg)
         alerts_sent += 1
 
+    # ── 4. Spotify Viral France ──
+    print("  [4/5] Spotify Viral France...")
+    spotify = get_spotify_viral()
+    if spotify:
+        msg = (
+            f"🎧 <b>SPOTIFY VIRAL FRANCE — Sons TikTok du moment</b>\n\n"
+        )
+        for i, s in enumerate(spotify, 1):
+            msg += f"{i}. {s}\n"
+        msg += (
+            f"\n💡 Ces sons sont déjà viraux en France\n"
+            f"→ Utilise-les MAINTENANT avant saturation\n\n"
+            f"⏰ {datetime.now().strftime('%H:%M — %d/%m/%Y')}"
+        )
+        send_telegram(msg)
+        alerts_sent += 1
+
+    # ── 5. Résumé stratégique ──
+    print("  [5/5] Résumé stratégique...")
+    us_trends  = [t for t in all_trends if t["us_score"] > 60 and t["fr_score"] < 30][:3]
+    fr_trends  = [t for t in all_trends if t["fr_score"] > 60][:3]
+
+    if us_trends or fr_trends:
+        summary = (
+            f"📊 <b>RÉSUMÉ STRATÉGIQUE — {datetime.now().strftime('%d/%m/%Y')}</b>\n\n"
+            f"🇺🇸 <b>À surveiller (arrivent en FR) :</b>\n"
+        )
+        for t in us_trends:
+            summary += f"• {t['name']} (US: {t['us_score']}/100)\n"
+        summary += f"\n🇫🇷 <b>À utiliser maintenant (viral FR) :</b>\n"
+        for t in fr_trends:
+            summary += f"• {t['name']} (FR: {t['fr_score']}/100)\n"
+        summary += (
+            f"\n⏰ <b>Meilleurs horaires aujourd'hui :</b>\n"
+            f"{get_best_times()}\n\n"
+            f"📅 {datetime.now().strftime('%d/%m/%Y')}"
+        )
+        send_telegram(summary)
+        alerts_sent += 1
+
     return alerts_sent
 
-# ── Main ──────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════
+#  🚀  MAIN
+# ════════════════════════════════════════════════════════
 
 def main():
-    print("=" * 55)
-    print("   TIKTOK TREND BOT v2 — Sources fiables")
-    print(f"   Google Trends FR + YouTube Charts + TikTok")
-    print(f"   Analyse toutes les {CHECK_INTERVAL // 60} minutes")
-    print("=" * 55)
+    print("=" * 62)
+    print("   TIKTOK TREND BOT v3 — US + FR + Toutes niches")
+    print(f"   Sources : Google Trends US+FR, Billboard, Spotify")
+    print(f"   Logique : US explose → tu es premier en France")
+    print(f"   Analyse : toutes les {CHECK_INTERVAL // 60} minutes")
+    print("=" * 62)
 
     send_telegram(
-        f"🎯 <b>TikTok Trend Bot v2 démarré !</b>\n\n"
-        f"✅ Sources fiables uniquement :\n"
-        f"• Google Trends France temps réel\n"
-        f"• Recherches virales du moment\n"
-        f"• Sons tendance YouTube/TikTok\n"
-        f"• Hashtags TikTok réels\n\n"
-        f"🎯 Niches : Sport • Mode • Lifestyle • Motivation\n"
-        f"⏰ Analyse toutes les heures\n\n"
+        f"🎯 <b>TikTok Trend Bot v3 — ULTIMATE</b>\n\n"
+        f"🇺🇸 Surveillance US → détecte AVANT la France\n"
+        f"🌍 Google Trends US + FR en parallèle\n"
+        f"🎵 Billboard Hot 100 — sons qui arrivent\n"
+        f"🎧 Spotify Viral France — sons actifs\n"
+        f"💡 Idées contenu sans limites de niche\n"
+        f"⏰ Meilleurs horaires de publication\n\n"
         f"🟢 Première analyse en cours..."
     )
 
@@ -362,7 +452,7 @@ def main():
         cycle += 1
         print(f"\n══ ANALYSE #{cycle} ══ {datetime.now().strftime('%H:%M')} ══")
         alerts = analyze_and_alert()
-        print(f"══ FIN #{cycle} ══ {alerts} alerte(s) envoyée(s)")
+        print(f"══ FIN #{cycle} ══ {alerts} message(s) envoyé(s)")
         print(f"   Prochain scan dans {CHECK_INTERVAL // 60} minutes")
         time.sleep(CHECK_INTERVAL)
 
